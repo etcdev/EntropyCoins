@@ -24,6 +24,7 @@
 #       -DLEVELDB_PLATFORM_POSIX     for Posix-based platforms
 #       -DSNAPPY                     if the Snappy library is present
 #
+#
 
 OUTPUT=$1
 PREFIX=$2
