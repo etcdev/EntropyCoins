@@ -5,7 +5,7 @@ http://www.entropycoins.com
 
 Copyright (c) 2009-2013 Bitcoin Developers
 Copyright (c) 2011-2013 Litecoin Developers
-Cpoyright (c) 2014 EntropyCoin Developers
+Copyright (c) 2014 EntropyCoin Developers
 
 What is Entropycoin?
 ----------------
