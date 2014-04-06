@@ -50,6 +50,8 @@ bool fReindex = false;
 bool fBenchmark = false;
 bool fTxIndex = false;
 unsigned int nCoinCacheSize = 5000;
+int64 nChainStartTimeNAdaptive = 1396820405;
+int64 nHardforkStartTime =  1396820415;  
 
 /** Fees smaller than this (in satoshi) are considered zero fee (for transaction creation) */
 int64 CTransaction::nMinTxFee = 100000;
@@ -1064,6 +1066,66 @@ uint256 static GetOrphanRoot(const CBlockHeader* pblock)
     return pblock->GetHash();
 }
 
+
+
+// yacoin: increasing Nfactor gradually
+const unsigned char minNfactor = 10;
+const unsigned char maxNfactor = 30;
+
+unsigned char GetNfactor(int64 nTimestamp) {
+    int l = 0;
+
+    if (nTimestamp <= nHardforkStartTime)
+        return 9; // standard Scrypt
+
+    if (nTimestamp <= nChainStartTimeNAdaptive)
+        return minNfactor;
+
+    int64 s = nTimestamp - nChainStartTimeNAdaptive;
+    while ((s >> 1) > 3) {
+      l += 1;
+      s >>= 1;
+    }
+
+    s &= 3;
+
+    int n = (l * 158 + s * 28 - 2670) / 100;
+
+    if (n < 0) n = 0;
+
+    if (n > 255)
+        printf( "GetNfactor(%lld) - something wrong(n == %d)\n", nTimestamp, n );
+
+    unsigned char N = (unsigned char) n;
+    //printf("GetNfactor: %d -> %d %d : %d / %d\n", nTimestamp - nChainStartTimeNAdaptive, l, s, n, min(max(N, minNfactor), maxNfactor));
+
+    return min(max(N, minNfactor), maxNfactor);
+}
+
+// Spaincoin subsidy table
+const static int spa_subsidy[101] = {
+0, 940, 3492, 6069, 8673, 11304, 13963, 16650, 19366, 22112, 24887, 27694, 30532, 33402, 36305, 39241, 42213, 45219, 48262, 51342, 54459, 57616, 60812, 64050, 67329, 70652, 74018, 77430, 80889, 84396, 87952, 91559, 95218, 98930, 102698, 106523, 110407, 114351, 118358, 122429, 126566, 130773, 135051, 139402, 143830, 148336, 152924, 157597, 162358, 167210, 172157, 177203, 182351, 187607, 192974, 198457, 204062, 209794, 215659, 221663, 227813, 234116, 240581, 247215, 254027, 261028, 268229, 275641, 283276, 291149, 299275, 307671, 316355, 325347, 334672, 344353, 354420, 364904, 375841, 387273, 399246, 411814, 425039, 438994, 453765, 469451, 486176, 504084, 523359, 544224, 566966, 591957, 619690, 650844, 686380, 727739, 777208, 838764, 920291, 1041340, 1281967 };
+
+// original function - not used, to prevent trouble porting double precision stuff to other languages, compilers and hardware
+//return (int64)(100./pow(2,((double)n)/(21915.*8.))+.37075);  //the table can be generated from this function (100.=initial reward; 8.=months for halving)
+
+// bin search the lookup table
+inline int64 spa_sub_bin(int nHeight) {
+        int i=0, a=1, b=100;
+        if (nHeight>=spa_subsidy[100]) return 0;
+        while (b>=a)
+        {
+                i = (a+b)>>1; //midpoint
+                if (nHeight<spa_subsidy[i] && nHeight>=spa_subsidy[i-1])
+                        break;
+                else if (spa_subsidy[i] <= nHeight)
+                        a = i+1;
+                else
+                        b = i-1;
+        }
+        return (int64)(101-i);
+}
+
 int64 static GetBlockValue(int nHeight, int64 nFees)
 {
     int64 nSubsidy = 96 * COIN;
@@ -1125,7 +1187,7 @@ unsigned int ComputeMinWork(unsigned int nBase, int64 nTime)
     return bnResult.GetCompact();
 }
 
-unsigned int static GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
+unsigned int static GetNextWorkRequired_V1(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
 {
     unsigned int nProofOfWorkLimit = bnProofOfWorkLimit.GetCompact();
 
@@ -1193,6 +1255,81 @@ unsigned int static GetNextWorkRequired(const CBlockIndex* pindexLast, const CBl
 
     return bnNew.GetCompact();
 }
+
+unsigned int static KimotoGravityWell(const CBlockIndex* pindexLast, const CBlockHeader *pblock, uint64 TargetBlocksSpacingSeconds, uint64 PastBlocksMin, uint64 PastBlocksMax) {
+        /* current difficulty formula, megacoin - kimoto gravity well */
+        const CBlockIndex *BlockLastSolved = pindexLast;
+        const CBlockIndex *BlockReading = pindexLast;
+        const CBlockHeader *BlockCreating = pblock;
+        BlockCreating = BlockCreating;
+        uint64 PastBlocksMass = 0;
+        int64 PastRateActualSeconds = 0;
+        int64 PastRateTargetSeconds = 0;
+        double PastRateAdjustmentRatio = double(1);
+        CBigNum PastDifficultyAverage;
+        CBigNum PastDifficultyAveragePrev;
+        double EventHorizonDeviation;
+        double EventHorizonDeviationFast;
+        double EventHorizonDeviationSlow;
+        
+    if (BlockLastSolved == NULL || BlockLastSolved->nHeight == 0 || (uint64)BlockLastSolved->nHeight < PastBlocksMin) { return bnProofOfWorkLimit.GetCompact(); }
+        
+        for (unsigned int i = 1; BlockReading && BlockReading->nHeight > 0; i++) {
+                if (PastBlocksMax > 0 && i > PastBlocksMax) { break; }
+                PastBlocksMass++;
+                
+                if (i == 1) { PastDifficultyAverage.SetCompact(BlockReading->nBits); }
+                else { PastDifficultyAverage = ((CBigNum().SetCompact(BlockReading->nBits) - PastDifficultyAveragePrev) / i) + PastDifficultyAveragePrev; }
+                PastDifficultyAveragePrev = PastDifficultyAverage;
+                
+                PastRateActualSeconds = BlockLastSolved->GetBlockTime() - BlockReading->GetBlockTime();
+                PastRateTargetSeconds = TargetBlocksSpacingSeconds * PastBlocksMass;
+                PastRateAdjustmentRatio = double(1);
+                if (PastRateActualSeconds < 0) { PastRateActualSeconds = 0; }
+                if (PastRateActualSeconds != 0 && PastRateTargetSeconds != 0) {
+                PastRateAdjustmentRatio = double(PastRateTargetSeconds) / double(PastRateActualSeconds);
+                }
+                EventHorizonDeviation = 1 + (0.7084 * pow((double(PastBlocksMass)/double(28.2)), -1.228));
+                EventHorizonDeviationFast = EventHorizonDeviation;
+                EventHorizonDeviationSlow = 1 / EventHorizonDeviation;
+                
+                if (PastBlocksMass >= PastBlocksMin) {
+                        if ((PastRateAdjustmentRatio <= EventHorizonDeviationSlow) || (PastRateAdjustmentRatio >= EventHorizonDeviationFast)) { assert(BlockReading); break; }
+                }
+                if (BlockReading->pprev == NULL) { assert(BlockReading); break; }
+                BlockReading = BlockReading->pprev;
+        }
+        
+        CBigNum bnNew(PastDifficultyAverage);
+        if (PastRateActualSeconds != 0 && PastRateTargetSeconds != 0) {
+                bnNew *= PastRateActualSeconds;
+                bnNew /= PastRateTargetSeconds;
+        }
+    if (bnNew > bnProofOfWorkLimit) { bnNew = bnProofOfWorkLimit; }
+        
+    return bnNew.GetCompact();
+}
+
+unsigned int static GetNextWorkRequired_V2(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
+{
+        static const int64 BlocksTargetSpacing = 2 * 60; // 2 minutes for Spaincoin
+        static const unsigned int TimeDaySeconds = 60 * 60 * 24;
+        int64 PastSecondsMin = TimeDaySeconds * 0.01; // 0.25 in megacoin, 0.01 in some others
+        int64 PastSecondsMax = TimeDaySeconds * 0.14; // 7 days in megacoin, 0.14 in some others
+        uint64 PastBlocksMin = PastSecondsMin / BlocksTargetSpacing;
+        uint64 PastBlocksMax = PastSecondsMax / BlocksTargetSpacing;
+        
+        return KimotoGravityWell(pindexLast, pblock, BlocksTargetSpacing, PastBlocksMin, PastBlocksMax);
+}
+
+unsigned int static GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
+{
+		if (pindexLast->nHeight+1 < 51) 
+			return GetNextWorkRequired_V1(pindexLast, pblock); //fast retarget (first blocks only)
+		else
+			return GetNextWorkRequired_V2(pindexLast, pblock); //kgw retarget
+}
+
 
 bool CheckProofOfWork(uint256 hash, unsigned int nBits)
 {
@@ -2808,47 +2945,10 @@ bool InitBlockIndex() {
         uint256 hash = block.GetHash();
         printf("%s\n", hash.ToString().c_str());
         printf("%s\n", hashGenesisBlock.ToString().c_str());
-        printf("%s\n", block.hashMerkleRoot.ToString().c_str());
-        
+        printf("%s\n", block.hashMerkleRoot.ToString().c_str());        
 		assert(block.hashMerkleRoot == uint256("0xc582b186a80f08d2d32ecfc8bd87341ce0cda492ec370f529dac8efc264eeb7a"));
 		
-		block.print();
-		
-		//adding to mine new block
-        // If genesis block hash does not match, then generate new genesis hash.
-		if (false && block.GetHash() != hashGenesisBlock)
-        {
-            printf("Searching for genesis block...\n");
-            // This will figure out a valid hash and Nonce if you're
-            // creating a different genesis block:
-            uint256 hashTarget = CBigNum().SetCompact(block.nBits).getuint256();
-            uint256 thash;
-            char scratchpad[SCRYPT_SCRATCHPAD_SIZE];
-
-            loop
-            {
-                scrypt_1024_1_1_256_sp(BEGIN(block.nVersion), BEGIN(thash), scratchpad);
-                if (thash <= hashTarget)
-                    break;
-                if ((block.nNonce & 0xFFF) == 0)
-                {
-                    printf("nonce %08X: hash = %s (target = %s)\n", block.nNonce, thash.ToString().c_str(), hashTarget.ToString().c_str());
-                }
-                ++block.nNonce;
-                if (block.nNonce == 0)
-                {
-                    printf("NONCE WRAPPED, incrementing time\n");
-                    ++block.nTime;
-                }
-            }
-
-			printf("Found Genesis Block\n");
-			printf("block.nTime = %u \n", block.nTime);
-			printf("block.nNonce = %u \n", block.nNonce);
-			printf("block.GetHash = %s\n", block.GetHash().ToString().c_str());
-        }		
-		//end add
-		
+		block.print();		
         assert(hash == hashGenesisBlock);
 
         // Start new block file
@@ -4657,10 +4757,21 @@ void static EntropycoinMiner(CWallet *pwallet)
             unsigned int nHashesDone = 0;
 
             uint256 thash;
-            char scratchpad[SCRYPT_SCRATCHPAD_SIZE];
+            
+            unsigned long int scrypt_scratpad_size_current_block = ((1 << (GetNfactor(pblock->nTime) + 1)) * 128 ) + 63;
+            
+            char scratchpad[scrypt_scratpad_size_current_block];
+            
+            /*printf("nTime -> %d", pblock->nTime);
+            printf("scrypt_scratpad_size_current_block -> %ld", sizeof(scrypt_scratpad_size_current_block));
+            printf("scratchpad -> %d", sizeof(scratchpad));*/
+            
             loop
             {
-                scrypt_1024_1_1_256_sp(BEGIN(pblock->nVersion), BEGIN(thash), scratchpad);
+
+                // Generic scrypt
+                scrypt_N_1_1_256_sp_generic(BEGIN(pblock->nVersion), BEGIN(thash), scratchpad, GetNfactor(pblock->nTime));
+
 
                 if (thash <= hashTarget)
                 {
