@@ -9,7 +9,7 @@
 CXX=llvm-g++
 DEPSDIR=/usr/local
 DB4DIR=/usr/local/opt/berkeley-db4
-OPENSSLDIR=/usr/local/Cellar/openssl/openssl-1.0.1e
+OPENSSLDIR=/usr/local/Cellar/openssl/openssl-1.0.1g
 
 INCLUDEPATHS= \
  -I"$(CURDIR)" \
