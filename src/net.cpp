@@ -1209,6 +1209,7 @@ static const char *strTestNetDNSSeed[][2] = {
 // The second name should resolve to a list of seed addresses.
 static const char *strMainNetDNSSeed[][2] = {
     {"127.0.0.1", "127.0.0.1"},
+    {"seed.entropycoins.com", "seed.entropycoins.com"},
     {NULL, NULL}
 };
 
