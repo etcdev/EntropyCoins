@@ -51,7 +51,9 @@ bool fBenchmark = false;
 bool fTxIndex = false;
 unsigned int nCoinCacheSize = 5000;
 int64 nChainStartTimeNAdaptive = 1396820405;
-int64 nHardforkStartTime =  1396820415;  
+int64 nHardforkStartTime =  1396820415; //first hardfork to scrypt-N
+
+const int64 nDiffChangeTarget = 98315; // second hardfork: diff change to Digishield on block 98315
 
 /** Fees smaller than this (in satoshi) are considered zero fee (for transaction creation) */
 int64 CTransaction::nMinTxFee = 100000;
@@ -1102,30 +1104,6 @@ unsigned char GetNfactor(int64 nTimestamp) {
     return min(max(N, minNfactor), maxNfactor);
 }
 
-// Spaincoin subsidy table
-const static int spa_subsidy[101] = {
-0, 940, 3492, 6069, 8673, 11304, 13963, 16650, 19366, 22112, 24887, 27694, 30532, 33402, 36305, 39241, 42213, 45219, 48262, 51342, 54459, 57616, 60812, 64050, 67329, 70652, 74018, 77430, 80889, 84396, 87952, 91559, 95218, 98930, 102698, 106523, 110407, 114351, 118358, 122429, 126566, 130773, 135051, 139402, 143830, 148336, 152924, 157597, 162358, 167210, 172157, 177203, 182351, 187607, 192974, 198457, 204062, 209794, 215659, 221663, 227813, 234116, 240581, 247215, 254027, 261028, 268229, 275641, 283276, 291149, 299275, 307671, 316355, 325347, 334672, 344353, 354420, 364904, 375841, 387273, 399246, 411814, 425039, 438994, 453765, 469451, 486176, 504084, 523359, 544224, 566966, 591957, 619690, 650844, 686380, 727739, 777208, 838764, 920291, 1041340, 1281967 };
-
-// original function - not used, to prevent trouble porting double precision stuff to other languages, compilers and hardware
-//return (int64)(100./pow(2,((double)n)/(21915.*8.))+.37075);  //the table can be generated from this function (100.=initial reward; 8.=months for halving)
-
-// bin search the lookup table
-inline int64 spa_sub_bin(int nHeight) {
-        int i=0, a=1, b=100;
-        if (nHeight>=spa_subsidy[100]) return 0;
-        while (b>=a)
-        {
-                i = (a+b)>>1; //midpoint
-                if (nHeight<spa_subsidy[i] && nHeight>=spa_subsidy[i-1])
-                        break;
-                else if (spa_subsidy[i] <= nHeight)
-                        a = i+1;
-                else
-                        b = i-1;
-        }
-        return (int64)(101-i);
-}
-
 int64 static GetBlockValue(int nHeight, int64 nFees)
 {
     int64 nSubsidy = 96 * COIN;
@@ -1152,14 +1130,18 @@ int64 static GetBlockValue(int nHeight, int64 nFees)
 		nSubsidy *= 3;
 	}	
 		
-    // Subsidy cut in half every year
-    nSubsidy >>= (nHeight / 210000); // Entropycoin: 210k blocks in ~1 years
+    // Subsidy cut in half every 3 years
+    nSubsidy >>= (nHeight / 630000); // Entropycoin: 630k blocks in ~3 years
 
     return nSubsidy + nFees;
 }
 
 static const int64 nTargetTimespan = 30 * 60; // Entropycoin: retarget every 30 minutes
-static const int64 nTargetSpacing = 60; // Entropycoin: 1 minute blocks
+static const int64 nTargetSpacing = 60; // Entropycoin: 1 minute blocks before Scrypt-N
+
+static const int64 nTargetTimespanNEW = 60 * 2; // Entropycoin: every block (2 minutes) (digishield)
+static const int64 nTargetSpacingNEW = 60 * 2; // Entropycoin: 2 minute blocks after Scrypt-N
+
 static const int64 nInterval = nTargetTimespan / nTargetSpacing;
 
 //
@@ -1177,10 +1159,17 @@ unsigned int ComputeMinWork(unsigned int nBase, int64 nTime)
     bnResult.SetCompact(nBase);
     while (nTime > 0 && bnResult < bnProofOfWorkLimit)
     {
+        if (nBestHeight+1<nDiffChangeTarget) { 
         // Maximum 400% adjustment...
         bnResult *= 4;
         // ... in best-case exactly 4-times-normal target time
         nTime -= nTargetTimespan*4;
+        } else { //digishield
+            // Maximum 10% adjustment...
+            bnResult = (bnResult * 110) / 100;
+            // ... in best-case exactly 4-times-normal target time
+            nTime -= nTargetTimespanNEW*4;
+        }
     }
     if (bnResult > bnProofOfWorkLimit)
         bnResult = bnProofOfWorkLimit;
@@ -1190,26 +1179,37 @@ unsigned int ComputeMinWork(unsigned int nBase, int64 nTime)
 unsigned int static GetNextWorkRequired_V1(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
 {
     unsigned int nProofOfWorkLimit = bnProofOfWorkLimit.GetCompact();
+    int nHeight = pindexLast->nHeight + 1;
+    const bool fNewDifficultyProtocol = (nHeight >= nDiffChangeTarget);
+    
+    int64 retargetTimespan = nTargetTimespan;
+    int64 retargetSpacing = nTargetSpacing;
+    int64 retargetInterval = nInterval;
+    
+    if (fNewDifficultyProtocol) {
+        retargetInterval = nTargetTimespanNEW / nTargetSpacingNEW; //stay with 2 minute blocks Entropycoin
+        retargetTimespan = nTargetTimespanNEW;
+    }
 
     // Genesis block
     if (pindexLast == NULL)
         return nProofOfWorkLimit;
 
     // Only change once per interval
-    if ((pindexLast->nHeight+1) % nInterval != 0)
+    if ((pindexLast->nHeight+1) % retargetInterval != 0)
     {
         // Special difficulty rule for testnet:
         if (fTestNet)
         {
-            // If the new block's timestamp is more than 2* 10 minutes
+            // If the new block's timestamp is more than 2* nTargetSpacing minutes
             // then allow mining of a min-difficulty block.
-            if (pblock->nTime > pindexLast->nTime + nTargetSpacing*2)
+            if (pblock->nTime > pindexLast->nTime + retargetSpacing*2)
                 return nProofOfWorkLimit;
             else
             {
                 // Return the last non-special-min-difficulty-rules-block
                 const CBlockIndex* pindex = pindexLast;
-                while (pindex->pprev && pindex->nHeight % nInterval != 0 && pindex->nBits == nProofOfWorkLimit)
+                while (pindex->pprev && pindex->nHeight % retargetInterval != 0 && pindex->nBits == nProofOfWorkLimit)
                     pindex = pindex->pprev;
                 return pindex->nBits;
             }
@@ -1220,9 +1220,9 @@ unsigned int static GetNextWorkRequired_V1(const CBlockIndex* pindexLast, const 
 
     // Entropycoin: This fixes an issue where a 51% attack can change difficulty at will.
     // Go back the full period unless it's the first retarget after genesis. Code courtesy of Art Forz
-    int blockstogoback = nInterval-1;
-    if ((pindexLast->nHeight+1) != nInterval)
-        blockstogoback = nInterval;
+    int blockstogoback = retargetInterval-1;
+    if ((pindexLast->nHeight+1) != retargetInterval)
+        blockstogoback = retargetInterval;
 
     // Go back by what we want to be 14 days worth of blocks
     const CBlockIndex* pindexFirst = pindexLast;
@@ -1233,23 +1233,37 @@ unsigned int static GetNextWorkRequired_V1(const CBlockIndex* pindexLast, const 
     // Limit adjustment step
     int64 nActualTimespan = pindexLast->GetBlockTime() - pindexFirst->GetBlockTime();
     printf("  nActualTimespan = %"PRI64d"  before bounds\n", nActualTimespan);
+
+    CBigNum bnNew;
+    bnNew.SetCompact(pindexLast->nBits);
+
+    if (fNewDifficultyProtocol) //DigiShield implementation - thanks to RealSolid & WDC for this code
+    {
+	// amplitude filter - thanks to daft27 for this code
+        nActualTimespan = retargetTimespan + (nActualTimespan - retargetTimespan)/8;
+        printf("DIGISHIELD RETARGET\n");
+        if (nActualTimespan < (retargetTimespan - (retargetTimespan/4)) ) nActualTimespan = (retargetTimespan - (retargetTimespan/4));
+        if (nActualTimespan > (retargetTimespan + (retargetTimespan/2)) ) nActualTimespan = (retargetTimespan + (retargetTimespan/2));
+    }
+    else 
+    {
     if (nActualTimespan < nTargetTimespan/4)
         nActualTimespan = nTargetTimespan/4;
     if (nActualTimespan > nTargetTimespan*4)
         nActualTimespan = nTargetTimespan*4;
+    }
 
     // Retarget
-    CBigNum bnNew;
-    bnNew.SetCompact(pindexLast->nBits);
+
     bnNew *= nActualTimespan;
-    bnNew /= nTargetTimespan;
+    bnNew /= retargetTimespan;
 
     if (bnNew > bnProofOfWorkLimit)
         bnNew = bnProofOfWorkLimit;
 
     /// debug print
     printf("GetNextWorkRequired RETARGET\n");
-    printf("nTargetTimespan = %"PRI64d"    nActualTimespan = %"PRI64d"\n", nTargetTimespan, nActualTimespan);
+    printf("nTargetTimespan = %"PRI64d"    nActualTimespan = %"PRI64d"\n", retargetTimespan, nActualTimespan);
     printf("Before: %08x  %s\n", pindexLast->nBits, CBigNum().SetCompact(pindexLast->nBits).getuint256().ToString().c_str());
     printf("After:  %08x  %s\n", bnNew.GetCompact(), bnNew.getuint256().ToString().c_str());
 
@@ -1312,7 +1326,7 @@ unsigned int static KimotoGravityWell(const CBlockIndex* pindexLast, const CBloc
 
 unsigned int static GetNextWorkRequired_V2(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
 {
-        static const int64 BlocksTargetSpacing = 2 * 60; // 2 minutes for Spaincoin
+        static const int64 BlocksTargetSpacing = 2 * 60; // 2 minutes for Entropycoin with Scrypt-N
         static const unsigned int TimeDaySeconds = 60 * 60 * 24;
         int64 PastSecondsMin = TimeDaySeconds * 0.01; // 0.25 in megacoin, 0.01 in some others
         int64 PastSecondsMax = TimeDaySeconds * 0.14; // 7 days in megacoin, 0.14 in some others
@@ -1324,10 +1338,10 @@ unsigned int static GetNextWorkRequired_V2(const CBlockIndex* pindexLast, const 
 
 unsigned int static GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
 {
-		if (pindexLast->nHeight+1 < 51) 
-			return GetNextWorkRequired_V1(pindexLast, pblock); //fast retarget (first blocks only)
-		else
-			return GetNextWorkRequired_V2(pindexLast, pblock); //kgw retarget
+    if (pindexLast->nHeight+1<51 || pindexLast->nHeight+1>=nDiffChangeTarget)
+		return GetNextWorkRequired_V1(pindexLast, pblock); //fast retarget (first blocks) OR DigiShield retarget (every block)
+	else
+		return GetNextWorkRequired_V2(pindexLast, pblock); //kgw retarget
 }
 
 
